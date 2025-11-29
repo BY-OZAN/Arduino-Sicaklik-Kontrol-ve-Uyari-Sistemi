@@ -1,0 +1,193 @@
+#include <DHT.h>
+#include <Servo.h>
+#include <LiquidCrystal_I2C.h>
+
+// --- Pin Tanımlamaları ---
+#define DHTPIN 8        
+#define DHTTYPE DHT11  
+#define KIRMIZI_LED 13 
+#define YESIL_LED 12   
+#define SERVO_PIN 9    
+#define BUZZER_PIN 10   
+
+// --- Eşik Değeri ---
+const float SICAKLIK_ESIGI = 27.7; 
+// const int MESAJ_SURESI_MS = 3000; // Kullanılmıyordu, kafa karıştırmasın diye kaldırdım
+const int BUZZER_FREKANS = 4000; // Tiz ses
+
+// --- Servo Hız Ayarı ---
+const int SERVO_HIZ_GECIKMESI = 20; 
+
+// --- Nesne Tanımlamaları ---
+DHT dht(DHTPIN, DHTTYPE);
+Servo servoMotor;
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+
+// --- Özel Karakter ---
+byte civaTermometreChar[] = {
+  B00100, B01010, B01010, B01010, B01010, B01110, B11111, B01110
+};
+
+// --- Durum Değişkenleri ---
+bool is_system_active = false; 
+int anlikServoAcisi = 0; 
+
+// --- Fonksiyonlar ---
+void servoYavasHareket(int hedefAci);
+void buzzerUyarisi(int tekrarSayisi); 
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("DHT Kontrol Sistemi Baslatildi.");
+
+  // 1. Önce pinleri ayarla
+  pinMode(KIRMIZI_LED, OUTPUT);
+  pinMode(YESIL_LED, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(YESIL_LED, HIGH); // Yeşil ışığı hemen yakalım
+
+  // 2. LCD ve Sensörü başlat
+  lcd.init();
+  lcd.backlight();
+  dht.begin();
+  lcd.createChar(0, civaTermometreChar); 
+
+  // Ekrana yazı yazılırken sistemin elektriği stabil hale gelir
+  lcd.clear();
+  lcd.print("Sistem Hazir");
+  lcd.setCursor(0, 1);
+  lcd.print("Guc Toplaniyor..");
+  
+  // 3. KRİTİK NOKTA: Elektriğin oturması için bekleme
+  delay(1000); 
+
+  // 4. Servo Başlatma Stratejisi
+  // Önce gitmesi gereken yeri söyle (henüz hareket etmez)
+  servoMotor.write(0); 
+  anlikServoAcisi = 0;
+  
+  // Kısa bir bekleme daha
+  delay(500);
+  
+  // EN SON attach yapıyoruz. Bu sayede motor ne yapacağını bilerek uyanır.
+  servoMotor.attach(SERVO_PIN);
+  
+  // Ekranı güncelle
+  lcd.setCursor(0, 1);
+  lcd.print("Esik: 27 C      ");
+  delay(1000); 
+}
+
+void loop() {
+  // DÜZELTME: Buradaki "delay(2000)" komutunu sildim.
+  // Artık sistem her döngüye girer girmez beklemeden ölçüm yapacak.
+
+  float sicaklik = dht.readTemperature();
+  
+  if (isnan(sicaklik)) {
+    Serial.println("DHT Hata!");
+    lcd.setCursor(0, 0);
+    lcd.print("DHT Hata!");
+    return; // Hata varsa döngüden çık
+  }
+  
+  int tamSicaklik = (int)sicaklik;
+  
+  Serial.print("SICAKLIK: ");
+  Serial.print(tamSicaklik);
+  Serial.print(" C. Durum: ");
+  
+  // --- KONTROL MEKANİZMASI ---
+  
+  // 1. Durum: Sıcaklık Yüksek ve Sistem KAPALI ise -> AÇ
+  if (sicaklik >= SICAKLIK_ESIGI && is_system_active == false) {
+    
+    Serial.println("ACILIYOR...");
+    lcd.clear();
+    lcd.print("SICAKLIK YUKSEK");
+    lcd.setCursor(0, 1);
+    lcd.print("ACILIYOR...");
+    
+    digitalWrite(KIRMIZI_LED, HIGH);
+    digitalWrite(YESIL_LED, LOW);
+    
+    servoYavasHareket(90); 
+    
+    is_system_active = true; 
+    
+    delay(500); // Buradaki bekleme süresini 1 saniyeden yarım saniyeye düşürdüm (daha seri olsun)
+    
+    buzzerUyarisi(3); 
+  } 
+  // 2. Durum: Sıcaklık Düşük ve Sistem AÇIK ise -> KAPAT
+  else if (sicaklik < SICAKLIK_ESIGI && is_system_active == true) {
+    
+    Serial.println("KAPANIYOR...");
+    lcd.clear();
+    lcd.print("SICAKLIK DUSTU");
+    lcd.setCursor(0, 1);
+    lcd.print("KAPANIYOR...");
+    
+    digitalWrite(KIRMIZI_LED, LOW);
+    digitalWrite(YESIL_LED, HIGH);
+
+    servoYavasHareket(0); 
+    
+    is_system_active = false; 
+    
+    delay(500); // Burayı da kısalttım
+
+    buzzerUyarisi(1); 
+  } else {
+    if (is_system_active) {
+      Serial.println("ACIK");
+    } else {
+      Serial.println("KAPALI");
+    }
+  }
+  
+  // --- Ekran Güncellemesi ---
+  lcd.clear();
+  lcd.print("SICAKLIK:");
+  lcd.print(tamSicaklik); 
+  lcd.print(" C");        
+  lcd.write(0);           
+
+  lcd.setCursor(0, 1);
+  lcd.print("DURUM: ");
+  if (is_system_active) {
+    lcd.print("ACIK");
+  } else {
+    lcd.print("KAPALI");
+  }
+
+  // DÜZELTME: Beklemeyi EN SONA aldım.
+  // 2000 yerine 1500 yaptım. Hem sensör bozulmaz hem sen daha az beklersin.
+  delay(1500); 
+}
+
+// --- Servo Yavaşlatma ---
+void servoYavasHareket(int hedefAci) {
+  if (anlikServoAcisi < hedefAci) {
+    for (int i = anlikServoAcisi; i <= hedefAci; i++) {
+      servoMotor.write(i);
+      delay(SERVO_HIZ_GECIKMESI); 
+    }
+  } else {
+    for (int i = anlikServoAcisi; i >= hedefAci; i--) {
+      servoMotor.write(i);
+      delay(SERVO_HIZ_GECIKMESI); 
+    }
+  }
+  anlikServoAcisi = hedefAci;
+}
+
+// --- Buzzer ---
+void buzzerUyarisi(int tekrarSayisi) {
+  for (int i = 0; i < tekrarSayisi; i++) {
+    tone(BUZZER_PIN, BUZZER_FREKANS); 
+    delay(80);         
+    noTone(BUZZER_PIN); 
+    delay(60);         
+  }
+}
